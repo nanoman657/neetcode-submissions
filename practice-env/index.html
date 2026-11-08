@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Practice Editor</title>
+<style>
+  :root { --bg:#fff; --fg:#1d1d1f; --muted:#6b6b70; --line:#e4e4e8; --accent:#2e7d32; --bad:#c62828; --code:#f6f6f8; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#16161a; --fg:#eaeaf0; --muted:#9a9aa6; --line:#2c2c34; --accent:#66bb6a; --bad:#ef5350; --code:#1e1e24; }
+  }
+  :root[data-theme="dark"] { --bg:#16161a; --fg:#eaeaf0; --muted:#9a9aa6; --line:#2c2c34; --accent:#66bb6a; --bad:#ef5350; --code:#1e1e24; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; flex:1; }
+  .rec { font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--bad); }
+  .dot.off { background:var(--muted); }
+  main { display:grid; grid-template-columns: 200px 1fr 1fr; flex:1; min-height:0; }
+  nav { border-right:1px solid var(--line); padding:12px; overflow:auto; }
+  nav button { display:block; width:100%; text-align:left; background:none; border:0; color:var(--fg); padding:6px 8px; border-radius:6px; cursor:pointer; font:inherit; }
+  nav button.active, nav button:hover { background:var(--code); }
+  section.statement { padding:16px; overflow:auto; border-right:1px solid var(--line); }
+  section.statement pre { white-space:pre-wrap; font:14px/1.5 system-ui, sans-serif; margin:0; }
+  section.work { display:flex; flex-direction:column; min-height:0; }
+  textarea { flex:1; width:100%; resize:none; border:0; outline:none; padding:14px; background:var(--code); color:var(--fg); font:14px/1.5 ui-monospace, Menlo, Consolas, monospace; tab-size:4; }
+  .bar { display:flex; gap:10px; align-items:center; padding:8px 12px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+  .bar button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:6px 14px; cursor:pointer; font:inherit; }
+  .output { padding:10px 14px; font:13px/1.5 ui-monospace, Menlo, Consolas, monospace; max-height:40%; overflow:auto; white-space:pre-wrap; }
+  .pass { color:var(--accent); } .fail { color:var(--bad); }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } nav { display:none; } section.statement { border-right:0; border-bottom:1px solid var(--line); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Practice Editor</h1>
+  <label class="rec"><input type="checkbox" id="recToggle" checked> <span class="dot" id="dot"></span> <span id="recText">Recording keystrokes</span></label>
+</header>
+<main>
+  <nav id="list"></nav>
+  <section class="statement"><pre id="statement">Loading…</pre></section>
+  <section class="work">
+    <textarea id="editor" spellcheck="false" aria-label="Code editor"></textarea>
+    <div class="bar"><button id="run">Run tests</button><span id="status" class="rec"></span></div>
+    <div class="output" id="output"></div>
+  </section>
+</main>
+<script>
+(() => {
+  let problems = [], current = null, lastSnapshot = "", buffer = [], snapshotTimer = null;
+  const $ = (id) => document.getElementById(id);
+  const editor = $("editor"), toggle = $("recToggle");
+  const sessionStart = Date.now();
+
+  // ---------- keystroke / thinking log ----------
+  // Each event is {t, type, ...}. Events are batched and POSTed to /api/log
+  // every 2s, and sent with sendBeacon when the page is closed.
+  function logEvent(type, data = {}) {
+    if (!toggle.checked) return;
+    buffer.push({ t: Date.now(), since_start_ms: Date.now() - sessionStart, type, problem: current && current.slug, ...data });
+  }
+  function flush(useBeacon = false) {
+    if (!buffer.length) return;
+    const events = buffer; buffer = [];
+    const body = JSON.stringify({ events });
+    if (useBeacon && navigator.sendBeacon) {
+      navigator.sendBeacon("/api/log", new Blob([body], { type: "application/json" }));
+    } else {
+      fetch("/api/log", { method: "POST", headers: { "Content-Type": "application/json" }, body }).catch(() => {
+        buffer = events.concat(buffer); // keep events if server is unreachable
+      });
+    }
+  }
+  setInterval(() => flush(false), 2000);
+  window.addEventListener("beforeunload", () => flush(true));
+
+  function updateRecIndicator() {
+    $("dot").classList.toggle("off", !toggle.checked);
+    $("recText").textContent = toggle.checked ? "Recording keystrokes" : "Recording paused";
+  }
+  toggle.addEventListener("change", () => {
+    logEvent("recording_toggled", { on: toggle.checked });
+    updateRecIndicator();
+  });
+
+  editor.addEventListener("keydown", (e) => {
+    logEvent("keydown", {
+      key: e.key, code: e.code, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey, alt: e.altKey,
+      sel_start: editor.selectionStart, sel_end: editor.selectionEnd, length: editor.value.length
+    });
+    if (e.key === "Tab") { // insert 4 spaces instead of moving focus
+      e.preventDefault();
+      const s = editor.selectionStart, end = editor.selectionEnd;
+      editor.value = editor.value.slice(0, s) + "    " + editor.value.slice(end);
+      editor.selectionStart = editor.selectionEnd = s + 4;
+      editor.dispatchEvent(new Event("input"));
+    }
+  });
+
+  // Snapshot the full code 1.5s after typing pauses, so a reader can replay
+  // how the solution evolved, not just which keys were pressed.
+  editor.addEventListener("input", () => {
+    clearTimeout(snapshotTimer);
+    snapshotTimer = setTimeout(() => {
+      if (editor.value !== lastSnapshot) {
+        logEvent("snapshot", { code: editor.value });
+        lastSnapshot = editor.value;
+      }
+    }, 1500);
+    saveDraft();
+  });
+
+  // ---------- drafts (per problem, in this browser) ----------
+  function draftKey() { return "draft:" + (current ? current.slug : ""); }
+  function saveDraft() { try { localStorage.setItem(draftKey(), editor.value); } catch (_) {} }
+  function loadDraft(p) {
+    try { return localStorage.getItem("draft:" + p.slug) ?? p.starter; } catch (_) { return p.starter; }
+  }
+
+  // ---------- problems ----------
+  function openProblem(p) {
+    logEvent("problem_opened", { slug: p.slug });
+    flush(false);
+    current = p;
+    lastSnapshot = "";
+    $("statement").textContent = p.statement;
+    editor.value = loadDraft(p);
+    lastSnapshot = editor.value;
+    $("output").textContent = "";
+    $("status").textContent = "";
+    document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.slug === p.slug));
+  }
+
+  async function loadProblems() {
+    problems = await (await fetch("/api/problems")).json();
+    const nav = $("list");
+    nav.innerHTML = "";
+    problems.forEach(p => {
+      const b = document.createElement("button");
+      b.textContent = p.title;
+      b.dataset.slug = p.slug;
+      b.onclick = () => openProblem(p);
+      nav.appendChild(b);
+    });
+    if (problems.length) openProblem(problems[0]);
+  }
+
+  // ---------- run ----------
+  $("run").addEventListener("click", async () => {
+    if (!current) return;
+    logEvent("run_requested", { code: editor.value });
+    $("status").textContent = "Running…";
+    const out = $("output");
+    try {
+      const res = await (await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: current.slug, code: editor.value }) })).json();
+      if (res.compile_error) {
+        out.innerHTML = ""; const d = document.createElement("div"); d.className = "fail";
+        d.textContent = "Error:\n" + res.compile_error; out.appendChild(d);
+        logEvent("run_result", { compile_error: res.compile_error });
+      } else {
+        const passed = res.results.filter(r => r.passed).length;
+        out.innerHTML = "";
+        res.results.forEach(r => {
+          const d = document.createElement("div"); d.className = r.passed ? "pass" : "fail";
+          d.textContent = (r.passed ? "PASS  " : "FAIL  ") + JSON.stringify(r.args) +
+            "  expected " + JSON.stringify(r.expected) + "  got " + JSON.stringify(r.got) + (r.error ? "  (" + r.error + ")" : "");
+          out.appendChild(d);
+        });
+        const summary = document.createElement("div");
+        summary.textContent = `\n${passed}/${res.results.length} passed`;
+        out.appendChild(summary);
+        logEvent("run_result", { passed, total: res.results.length });
+      }
+      $("status").textContent = "";
+    } catch (err) {
+      $("status").textContent = "Could not reach server: " + err;
+    }
+    flush(false);
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); $("run").click(); }
+  });
+
+  updateRecIndicator();
+  loadProblems();
+})();
+</script>
+</body>
+</html>
